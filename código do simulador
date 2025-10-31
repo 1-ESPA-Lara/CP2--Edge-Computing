@@ -1,0 +1,423 @@
+// -------- bibliotecas --------
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <RTClib.h>
+#include "DHT.h"
+
+// -------- definições de hardware --------
+#define DHTPIN 2
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+RTC_DS1307 rtc;
+
+const int ledGreen = 5;
+const int ledYellow = 4;
+const int ledRed = 3;
+const int buzzer = 6;
+
+const int joyVert = A3;  
+const int joyHorz = A2;  
+const int joySW   = 9;   
+
+const int ldrPin  = A0;
+
+// -------- limites exatos --------
+const float tempMin = 12.0;
+const float tempMax = 15.0;
+const int   umidMin = 60;
+const int   umidMax = 80;
+const int   lumMin  = 40;
+const int   lumMax  = 80;
+
+// -------- bytes logo (0..7 durante animação) --------
+byte garrafa1[8] = {B00000,B01111,B01000,B01000,B01000,B01111,B00000,B00000};
+byte garrafa2[8] = {B00000,B11111,B11100,B11100,B11100,B11111,B00000,B00000};
+byte garrafa3[8] = {B00000,B11110,B00011,B00001,B00011,B11110,B00000,B00000};
+byte garrafa4[8] = {B00000,B00000,B00000,B11000,B00000,B00000,B00000,B00000};
+byte gotaLogo[8] = {B00000,B00000,B00000,B11000,B00100,B00100,B01110,B00100};
+byte tacaVazia[8]= {B10001,B10001,B01010,B00100,B00100,B00100,B11111,B00000};
+byte tacaMeio[8] = {B10001,B11111,B01110,B00100,B00100,B00100,B11111,B00000};
+byte tacaCheia[8]= {B11111,B11111,B01110,B00100,B00100,B00100,B11111,B00000};
+
+// -------- ícones status (slots fixos: 0=term, 1=gota, 2=lamp) --------
+byte termVazia_b[8] = {B00100,B01010,B01010,B01010,B10001,B10001,B10001,B01110};
+byte termMeio_b[8]  = {B00100,B01010,B01010,B01010,B11111,B11111,B11111,B01110};
+byte termCheia_b[8] = {B00100,B01110,B01110,B01110,B11111,B11111,B11111,B01110};
+
+byte gotaVazia_b[8] = {B00100,B00100,B01010,B01010,B10001,B10001,B10001,B01110};
+byte gotaMeio_b[8]  = {B00100,B00100,B01010,B01010,B10001,B11111,B11111,B01110};
+byte gotaCheia_b[8] = {B00100,B00100,B01110,B01110,B11111,B11111,B11111,B01110};
+
+byte lampVazia_b[8] = {B01110,B10001,B10001,B10001,B01010,B01110,B00000,B01110};
+byte lampMeio_b[8]  = {B01110,B10001,B10001,B11111,B01110,B01110,B00000,B01110};
+byte lampCheia_b[8] = {B01110,B11111,B11111,B11111,B01110,B01110,B00000,B01110};
+
+// -------- variáveis --------
+float tempC = -999.0;
+float hum   = -1.0;
+int   lum   = 0;
+
+bool tudoOk = false;
+int  menuIndex = 0;
+unsigned long lastDebounce = 0;
+const unsigned long debounceDelay = 200UL;
+
+unsigned long lastDHTreadMillis = 0;
+const unsigned long DHT_INTERVAL = 2000UL;
+
+bool menuIntroShown = false; // controla o scroll 1x
+
+// -------- setup --------
+void setup() {
+  Serial.begin(115200);
+  lcd.init();
+  lcd.backlight();
+
+  // animação de boas-vindas usando 0..7
+  lcd.createChar(0, garrafa1);
+  lcd.createChar(1, garrafa2);
+  lcd.createChar(2, garrafa3);
+  lcd.createChar(3, garrafa4);
+  lcd.createChar(4, gotaLogo);
+  lcd.createChar(5, tacaVazia);
+  lcd.createChar(6, tacaMeio);
+  lcd.createChar(7, tacaCheia);
+
+  lcd.clear();
+  lcd.setCursor(5,0); lcd.write(byte(0));
+  lcd.setCursor(6,0); lcd.write(byte(1));
+  lcd.setCursor(7,0); lcd.write(byte(2));
+  lcd.setCursor(8,0); lcd.write(byte(3));
+  lcd.setCursor(8,1); lcd.write(byte(5));
+  delay(500);
+
+  lcd.clear();
+  lcd.setCursor(5,0); lcd.write(byte(0));
+  lcd.setCursor(6,0); lcd.write(byte(1));
+  lcd.setCursor(7,0); lcd.write(byte(2));
+  lcd.setCursor(8,0); lcd.write(byte(4));
+  lcd.setCursor(8,1); lcd.write(byte(6));
+  delay(500);
+
+  lcd.clear();
+  lcd.setCursor(5,0); lcd.write(byte(0));
+  lcd.setCursor(6,0); lcd.write(byte(1));
+  lcd.setCursor(7,0); lcd.write(byte(2));
+  lcd.setCursor(8,0); lcd.write(byte(4));
+  lcd.setCursor(8,1); lcd.write(byte(7));
+  delay(500);
+
+  lcd.clear();
+  lcd.setCursor(5,0); lcd.write(byte(0));
+  lcd.setCursor(6,0); lcd.write(byte(1));
+  lcd.setCursor(7,0); lcd.write(byte(2));
+  lcd.setCursor(8,0); lcd.write(byte(3));
+  lcd.setCursor(8,1); lcd.write(byte(7));
+  delay(500);
+
+  // boas-vindas
+  lcd.clear();
+  lcd.setCursor(0,0); lcd.print(" BEM-VINDO(a)!  ");
+  lcd.setCursor(0,1); lcd.print("Vinheria Agnello");
+  delay(2000);
+
+  // RTC
+  if (!rtc.begin()) {
+    lcd.clear();
+    lcd.setCursor(0,0); lcd.print("RTC nao detectado");
+    lcd.setCursor(0,1); lcd.print("Verifique cabos");
+    while (1) delay(1000);
+  }
+
+  // DHT
+  dht.begin();
+
+  // I/O
+  pinMode(ledGreen, OUTPUT);  digitalWrite(ledGreen, LOW);
+  pinMode(ledYellow, OUTPUT); digitalWrite(ledYellow, LOW);
+  pinMode(ledRed, OUTPUT);    digitalWrite(ledRed, LOW);
+  pinMode(buzzer, OUTPUT);    noTone(buzzer);
+  pinMode(joySW, INPUT_PULLUP);
+
+  lcd.clear();
+  lcd.setCursor(0,0); lcd.print("Sistema pronto...");
+  delay(500);
+  lcd.clear();
+
+  lastDHTreadMillis = millis() - DHT_INTERVAL;
+  Serial.println("Setup concluido");
+}
+
+// -------- loop --------
+void loop() {
+  // LDR -> 0..100%
+  int rawLDR = analogRead(ldrPin);
+  lum = map(rawLDR, 0, 1023, 0, 100);
+  if (lum < 0) lum = 0; if (lum > 100) lum = 100;
+
+  // DHT a cada 2s
+  if (millis() - lastDHTreadMillis >= DHT_INTERVAL) {
+    lastDHTreadMillis = millis();
+    float ttemp = dht.readTemperature();
+    float thum  = dht.readHumidity();
+
+    if (isnan(ttemp)) { delay(150); ttemp = dht.readTemperature(); }
+    if (isnan(ttemp))  tempC = -999.0;
+    else               tempC = (ttemp > 60.0) ? ((ttemp - 32.0) * 5.0 / 9.0) : ttemp;
+
+    if (isnan(thum)) { delay(150); thum = dht.readHumidity(); }
+    hum = isnan(thum) ? -1.0 : thum;
+
+    Serial.print("Temp(C): ");
+    if (tempC == -999.0) Serial.print("NaN"); else Serial.print(tempC);
+    Serial.print("  Hum(%): "); Serial.print(hum);
+    Serial.print("  Lum(%): "); Serial.println(lum);
+  }
+
+  // avaliação
+  tudoOk = true;
+  if (tempC == -999.0 || tempC < tempMin || tempC > tempMax) tudoOk = false;
+  if (hum   < 0.0     || hum   < umidMin || hum   > umidMax) tudoOk = false;
+  if (lum   < lumMin  || lum   > lumMax)  tudoOk = false;
+
+  // ---------- ERRO: mostra só o que tá fora ----------
+  if (!tudoOk) {
+    menuIntroShown = false; // reseta scroll para próxima normalização
+    lcd.clear();
+
+    bool alerta = false, critico = false;
+
+    // TEMPERATURA (slot 0)
+    if (tempC == -999.0 || tempC < tempMin || tempC > tempMax) {
+      if (tempC == -999.0 || tempC < tempMin) lcd.createChar(0, termVazia_b);
+      else                                     lcd.createChar(0, termCheia_b);
+      lcd.setCursor(0,0); lcd.write(byte(0)); lcd.print(" ");
+      if (tempC == -999.0) { lcd.print("--.-"); }
+      else { lcd.print(tempC,1); }
+      lcd.print((char)223); lcd.print("C");
+      if (tempC == -999.0 || tempC < tempMin) alerta = true; else critico = true;
+    }
+
+    // UMIDADE (slot 1)
+    if (hum < 0.0 || hum < umidMin || hum > umidMax) {
+      if (hum < 0.0 || hum < umidMin) lcd.createChar(1, gotaVazia_b);
+      else                            lcd.createChar(1, gotaCheia_b);
+      lcd.setCursor(0,1); lcd.write(byte(1)); lcd.print(" ");
+      if (hum < 0.0) lcd.print("--%"); else { lcd.print((int)hum); lcd.print("%"); }
+      if (hum < 0.0 || hum < umidMin) alerta = true; else critico = true;
+    }
+
+    // LUMINOSIDADE (slot 2)
+    if (lum < lumMin || lum > lumMax) {
+      if (lum < lumMin) lcd.createChar(2, lampVazia_b);
+      else              lcd.createChar(2, lampCheia_b);
+      lcd.setCursor(8,1); lcd.write(byte(2)); lcd.print(" ");
+      lcd.print(lum); lcd.print("%");
+      if (lum < lumMin) alerta = true; else critico = true;
+    }
+
+    // Sinalização
+    if (critico) {
+      digitalWrite(ledRed, HIGH);
+      digitalWrite(ledYellow, LOW);
+      digitalWrite(ledGreen, LOW);
+      tone(buzzer, 1000); delay(600); noTone(buzzer);
+    } else if (alerta) {
+      for (int i=0;i<3;i++){
+        digitalWrite(ledYellow, HIGH); tone(buzzer,1500); delay(150);
+        noTone(buzzer); digitalWrite(ledYellow, LOW); delay(150);
+      }
+      digitalWrite(ledYellow, HIGH);
+      digitalWrite(ledGreen, LOW);
+      digitalWrite(ledRed, LOW);
+    }
+
+    delay(600);
+    return; // permanece no modo ERRO; não entra no menu
+  }
+
+  // ---------- TUDO OK: MENU ----------
+  digitalWrite(ledGreen, HIGH);
+  digitalWrite(ledYellow, LOW);
+  digitalWrite(ledRed, LOW);
+  noTone(buzzer);
+
+  // Scroll 1x por sessão
+  if (!menuIntroShown) {
+    lcd.clear();
+    lcd.setCursor(0,0); lcd.print("1:Mudar horario 2:Ver ");
+    lcd.setCursor(0,1); lcd.print("3:Ver status ideal   ");
+    for (int s=0; s<20; s++) { delay(120); lcd.scrollDisplayLeft(); }
+    menuIntroShown = true;
+  }
+
+  // Desenha o menu e navegação
+  lcd.clear();
+  lcd.setCursor(0,0);
+  if (menuIndex == 0) lcd.print("> Mudar horario");
+  else                lcd.print("  Mudar horario");
+
+  lcd.setCursor(0,1);
+  if      (menuIndex == 1) lcd.print("> Ver status atual");
+  else if (menuIndex == 2) lcd.print("> Ver status ideal");
+  else                     lcd.print("  Ver status atual");
+
+  int valY = analogRead(joyVert);
+  if (valY < 400) { menuIndex--; if (menuIndex < 0) menuIndex = 2; delay(160); }
+  else if (valY > 600) { menuIndex++; if (menuIndex > 2) menuIndex = 0; delay(160); }
+
+  if (digitalRead(joySW) == LOW) {
+    if (millis() - lastDebounce > debounceDelay) {
+      lastDebounce = millis();
+
+      // ================= OPÇÃO 0: EDITOR GIRATÓRIO DE DATA/HORA =================
+      if (menuIndex == 0) {
+        DateTime now = rtc.now();
+        int eHour  = now.hour();
+        int eMin   = now.minute();
+        int eDay   = now.day();
+        int eMonth = now.month();
+        int eYear  = now.year(); // faixa 2020..2099 (ajuste se quiser)
+
+        int field = 0; // 0=Hora,1=Min,2=Dia,3=Mês,4=Ano
+        bool editing = true;
+
+        unsigned long lastMove = 0;
+        const unsigned long moveDelay = 160UL;
+
+        while (editing) {
+          // dias do mês (com bissexto)
+          int dim;
+          {
+            bool leap = ((eYear % 4 == 0) && (eYear % 100 != 0)) || (eYear % 400 == 0);
+            if      (eMonth == 1 || eMonth == 3 || eMonth == 5 || eMonth == 7 || eMonth == 8 || eMonth == 10 || eMonth == 12) dim = 31;
+            else if (eMonth == 4 || eMonth == 6 || eMonth == 9 || eMonth == 11) dim = 30;
+            else dim = leap ? 29 : 28;
+          }
+          if (eDay > dim) eDay = dim;
+
+          // UI
+          lcd.clear();
+          lcd.setCursor(0,0); 
+          lcd.print("Editar horario");
+          lcd.setCursor(0,1);
+          if (field == 0) { // Hora
+            lcd.print("> Hora  ");
+            if (eHour < 10) lcd.print("0"); lcd.print(eHour);
+            lcd.print(":");
+            if (eMin < 10) lcd.print("0"); lcd.print(eMin);
+          } else if (field == 1) { // Min
+            lcd.print("> Min   ");
+            if (eHour < 10) lcd.print("0"); lcd.print(eHour);
+            lcd.print(":");
+            if (eMin < 10) lcd.print("0"); lcd.print(eMin);
+          } else if (field == 2) { // Dia
+            lcd.print("> Dia   ");
+            if (eDay < 10) lcd.print("0"); lcd.print(eDay);
+            lcd.print("/");
+            if (eMonth < 10) lcd.print("0"); lcd.print(eMonth);
+          } else if (field == 3) { // Mês
+            lcd.print("> Mes   ");
+            if (eDay < 10) lcd.print("0"); lcd.print(eDay);
+            lcd.print("/");
+            if (eMonth < 10) lcd.print("0"); lcd.print(eMonth);
+          } else { // Ano
+            lcd.print("> Ano   ");
+            lcd.print(eYear);
+          }
+
+          int y = analogRead(joyVert);
+          int x = analogRead(joyHorz);
+          bool swPressed = (digitalRead(joySW) == LOW);
+
+          if (millis() - lastMove > moveDelay) {
+            if (y < 400) { // cima -> campo anterior
+              field--; if (field < 0) field = 4; lastMove = millis();
+            } else if (y > 600) { // baixo -> próximo campo
+              field++; if (field > 4) field = 0; lastMove = millis();
+            } else if (x < 400) { // esquerda -> decrementa
+              if (field == 0) { eHour--;  if (eHour  < 0)  eHour  = 23; }
+              else if (field == 1) { eMin--;   if (eMin   < 0)  eMin   = 59; }
+              else if (field == 2) { eDay--;   if (eDay   < 1)  eDay   = dim; }
+              else if (field == 3) { eMonth--; if (eMonth < 1)  eMonth = 12; }
+              else { eYear--; if (eYear < 2020) eYear = 2099; }
+              lastMove = millis();
+            } else if (x > 600) { // direita -> incrementa
+              if (field == 0) { eHour++;  if (eHour  > 23) eHour  = 0; }
+              else if (field == 1) { eMin++;   if (eMin   > 59) eMin   = 0; }
+              else if (field == 2) { eDay++;   if (eDay   > dim) eDay   = 1; }
+              else if (field == 3) { eMonth++; if (eMonth > 12) eMonth = 1; }
+              else { eYear++; if (eYear > 2099) eYear = 2020; }
+              lastMove = millis();
+            }
+          }
+
+          if (swPressed) {
+            if (millis() - lastDebounce > debounceDelay) {
+              lastDebounce = millis();
+              rtc.adjust(DateTime(eYear, eMonth, eDay, eHour, eMin, 0));
+              lcd.clear();
+              lcd.setCursor(0,0); lcd.print("Hora atualizada!");
+              lcd.setCursor(0,1);
+              if (eDay < 10) lcd.print("0"); lcd.print(eDay); lcd.print("/");
+              if (eMonth < 10) lcd.print("0"); lcd.print(eMonth); lcd.print("/");
+              lcd.print(eYear); lcd.print(" ");
+              if (eHour < 10) lcd.print("0"); lcd.print(eHour); lcd.print(":");
+              if (eMin  < 10) lcd.print("0"); lcd.print(eMin);
+              delay(900);
+              editing = false; // sai do editor
+            }
+          }
+
+          delay(40); // suaviza leitura sem travar
+        } // while(editing)
+      }
+      // ================= FIM OPÇÃO 0 =================
+
+      // OPÇÃO 1: status atual
+      else if (menuIndex == 1) {
+        lcd.clear();
+        if      (tempC < tempMin) lcd.createChar(0, termVazia_b);
+        else if (tempC > tempMax) lcd.createChar(0, termCheia_b);
+        else                      lcd.createChar(0, termMeio_b);
+        lcd.setCursor(0,0); lcd.write(byte(0)); lcd.print(" ");
+        lcd.print(tempC,1); lcd.print((char)223); lcd.print("C");
+        delay(1100);
+
+        lcd.clear();
+        if      (hum < 0.0 || hum < umidMin) lcd.createChar(1, gotaVazia_b);
+        else if (hum > umidMax)              lcd.createChar(1, gotaCheia_b);
+        else                                 lcd.createChar(1, gotaMeio_b);
+        lcd.setCursor(0,0); lcd.write(byte(1)); lcd.print(" ");
+        if (hum < 0.0) lcd.print("--%"); else { lcd.print((int)hum); lcd.print("%"); }
+        delay(1100);
+
+        lcd.clear();
+        if      (lum < lumMin) lcd.createChar(2, lampVazia_b);
+        else if (lum > lumMax) lcd.createChar(2, lampCheia_b);
+        else                   lcd.createChar(2, lampMeio_b);
+        lcd.setCursor(0,0); lcd.write(byte(2)); lcd.print(" ");
+        lcd.print(lum); lcd.print("%");
+        delay(1300);
+      }
+
+      // OPÇÃO 2: status ideal
+      else if (menuIndex == 2) {
+        lcd.clear();
+        lcd.setCursor(0,0);
+        lcd.print("T:"); lcd.print(tempMin); lcd.print("-"); lcd.print(tempMax); lcd.print((char)223); lcd.print("C");
+        lcd.setCursor(0,1);
+        lcd.print("U:"); lcd.print(umidMin); lcd.print("-"); lcd.print(umidMax); lcd.print("%");
+        delay(1500);
+        lcd.clear();
+        lcd.setCursor(0,0);
+        lcd.print("L:"); lcd.print(lumMin); lcd.print("-"); lcd.print(lumMax); lcd.print("%");
+        delay(1500);
+      }
+    }
+  }
+
+  delay(100);
+}

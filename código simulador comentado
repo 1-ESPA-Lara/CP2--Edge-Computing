@@ -1,0 +1,439 @@
+/*
+  - DHT11 no pino 2
+  - LDR no pino A0
+  - LCD I2C 0x27 16x2
+  - Joystick VRx=A2 VRy=A3 SW=9
+  - LEDs: verde=5, amarelo=4, vermelho=3
+  - Buzzer = 6
+  - Menu aparece somente se a Temperatura, Umidade e Luminosidaade estiverem OK
+  - Se alguma medida errada -> mostra apenas a(s) medida(s) errada(s)
+  - LED amarelo pisca 3x + buzzer que apite 3x (ALERTA) | LED vermelho + buzzer (CRÍTICO)
+  - Scroll do menu apenas 1x por sessão de “tudo OK”
+  - Sem funções externas (apenas setup e loop)
+*/
+
+// -------- bibliotecas --------
+#include <Wire.h>                     // Biblioteca para comunicação I2C (físico)
+#include <LiquidCrystal_I2C.h>        // Biblioteca para LCD via I2C
+#include <RTClib.h>                   // Biblioteca para RTC (relógio de tempo real)
+#include "DHT.h"                      // Biblioteca para sensor DHT (temp/umidade)
+
+// -------- definições de hardware --------
+#define DHTPIN 2                      // Pino digital onde o DHT está conectado
+#define DHTTYPE DHT11                // Tipo do sensor DHT (DHT11)
+DHT dht(DHTPIN, DHTTYPE);            // Instanciação do objeto DHT com pino e tipo
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);  // Instancia LCD I2C no endereço 0x27, 16x2
+RTC_DS1307 rtc;                      // Instancia objeto RTC DS1307
+
+const int ledGreen = 5;              // Pino do LED verde
+const int ledYellow = 4;             // Pino do LED amarelo
+const int ledRed = 3;                // Pino do LED vermelho
+const int buzzer = 6;                // Pino do buzzer
+
+const int joyVert = A3;              // Entrada analógica do joystick vertical (navegação)
+const int joyHorz = A2;              // Entrada analógica do joystick horizontal (edição)
+const int joySW   = 9;               // Pino do botão do joystick (SW) com pull-up
+
+const int ldrPin  = A0;              // Pino analógico do LDR (luminosidade)
+
+// -------- limites exatos --------
+const float tempMin = 12.0;          // Temperatura mínima ideal (°C)
+const float tempMax = 15.0;          // Temperatura máxima ideal (°C)
+
+const int   umidMin = 60;            // Umidade mínima ideal (%)
+const int   umidMax = 80;            // Umidade máxima ideal (%)
+
+const int   lumMin  = 40;            // Luminosidade mínima ideal (%)
+const int   lumMax  = 80;            // Luminosidade máxima ideal (%)
+
+// -------- bytes logo (0..7 durante animação) --------
+byte garrafa1[8] = {B00000,B01111,B01000,B01000,B01000,B01111,B00000,B00000}; // Bitmap parte 1 da garrafa
+byte garrafa2[8] = {B00000,B11111,B11100,B11100,B11100,B11111,B00000,B00000}; // Bitmap parte 2 da garrafa
+byte garrafa3[8] = {B00000,B11110,B00011,B00001,B00011,B11110,B00000,B00000}; // Bitmap parte 3 da garrafa
+byte garrafa4[8] = {B00000,B00000,B00000,B11000,B00000,B00000,B00000,B00000}; // Bitmap parte 4 da garrafa
+byte gotaLogo[8] = {B00000,B00000,B00000,B11000,B00100,B00100,B01110,B00100}; // Bitmap gota do logo
+byte tacaVazia[8]= {B10001,B10001,B01010,B00100,B00100,B00100,B11111,B00000}; // Taça vazia
+byte tacaMeio[8] = {B10001,B11111,B01110,B00100,B00100,B00100,B11111,B00000}; // Taça meio cheia
+byte tacaCheia[8]= {B11111,B11111,B01110,B00100,B00100,B00100,B11111,B00000}; // Taça cheia
+
+// -------- ícones status (slots fixos: termometro, gota e lâmpada) ----------
+byte termVazia_b[8] = {B00100,B01010,B01010,B01010,B10001,B10001,B10001,B01110}; // Termômetro vazio (temperatura baixa)
+byte termMeio_b[8]  = {B00100,B01010,B01010,B01010,B11111,B11111,B11111,B01110}; // Termômetro meio (temperatura ideal)
+byte termCheia_b[8] = {B00100,B01110,B01110,B01110,B11111,B11111,B11111,B01110}; // Termômetro cheio (temperatura alta)
+
+byte gotaVazia_b[8] = {B00100,B00100,B01010,B01010,B10001,B10001,B10001,B01110}; // Gota vazia (umidade baixa)
+byte gotaMeio_b[8]  = {B00100,B00100,B01010,B01010,B10001,B11111,B11111,B01110}; // Gota meio (umidade ideal)
+byte gotaCheia_b[8] = {B00100,B00100,B01110,B01110,B11111,B11111,B11111,B01110}; // Gota cheia (umidade alta)
+
+byte lampVazia_b[8] = {B01110,B10001,B10001,B10001,B01010,B01110,B00000,B01110}; // Lâmpada vazia (luminosidade baixa)
+byte lampMeio_b[8]  = {B01110,B10001,B10001,B11111,B01110,B01110,B00000,B01110}; // Lâmpada meio (luminosidade ideal)
+byte lampCheia_b[8] = {B01110,B11111,B11111,B11111,B01110,B01110,B00000,B01110}; // Lâmpada cheia (luminosidade alta)
+
+// -------- variáveis --------
+float tempC = -999.0;                // Temperatura atual em °C (valor inicial inválido)
+float hum   = -1.0;                  // Umidade relativa atual (%) (valor inicial inválido)
+int   lum   = 0;                     // Luminosidade atual (%) (mapeada do LDR)
+
+bool tudoOk = false;                 // Flag indicando se todos os parâmetros estão OK
+int  menuIndex = 0;                  // Índice do menu atual
+unsigned long lastDebounce = 0;      // Tempo da última ação para debouncing
+const unsigned long debounceDelay = 200UL; // Delay de debounce em ms
+
+unsigned long lastDHTreadMillis = 0; // Último tempo (millis) em que leu DHT
+const unsigned long DHT_INTERVAL = 2000UL; // Intervalo entre leituras DHT (2s)
+
+bool menuIntroShown = false;         // Controla se rolou o scroll introdutório (1x por sessão)
+
+// -------- setup --------
+void setup() {
+  Serial.begin(115200);              // Inicializa serial para debug em 115200 bps, pois é mais rápido que o de 9600bps
+  lcd.init();                        // Inicializa o LCD I2C
+  lcd.backlight();                   // Liga a luz de fundo do LCD
+
+  // animação de boas-vindas usando 0..7
+  lcd.createChar(0, garrafa1);       // Cria o caractere customizado 0 (garrafa1)
+  lcd.createChar(1, garrafa2);       // Cria o caractere customizado 1 (garrafa2)
+  lcd.createChar(2, garrafa3);       // Cria o caractere customizado 2 (garrafa3)
+  lcd.createChar(3, garrafa4);       // Cria o caractere customizado 3 (garrafa4)
+  lcd.createChar(4, gotaLogo);       // Cria o caractere customizado 4 (gota)
+  lcd.createChar(5, tacaVazia);      // Cria o caractere customizado 5 (taça vazia)
+  lcd.createChar(6, tacaMeio);       // Cria o caractere customizado 6 (taça meio)
+  lcd.createChar(7, tacaCheia);      // Cria o caractere customizado 7 (taça cheia)
+
+  lcd.clear();                       // Limpa o display
+  lcd.setCursor(5,0); lcd.write(byte(0)); // Mostra garrafa1 na posição (5,0)
+  lcd.setCursor(6,0); lcd.write(byte(1)); // Mostra garrafa2 na posição (6,0)
+  lcd.setCursor(7,0); lcd.write(byte(2)); // Mostra garrafa3 na posição (7,0)
+  lcd.setCursor(8,0); lcd.write(byte(3)); // Mostra garrafa4 na posição (8,0)
+  lcd.setCursor(8,1); lcd.write(byte(5)); // Mostra taça vazia na linha 1, coluna 8
+  delay(500);                        // Pausa 500 ms para animação
+
+  lcd.clear();                       // Limpa tela para próximo frame
+  lcd.setCursor(5,0); lcd.write(byte(0)); // Frame 2 - garrafa1
+  lcd.setCursor(6,0); lcd.write(byte(1)); // Frame 2 - garrafa2
+  lcd.setCursor(7,0); lcd.write(byte(2)); // Frame 2 - garrafa3
+  lcd.setCursor(8,0); lcd.write(byte(4)); // Frame 2 - gota
+  lcd.setCursor(8,1); lcd.write(byte(6)); // Frame 2 - taça meio
+  delay(500);                        // Pausa 500 ms
+
+  lcd.clear();                       // Limpa para próximo frame
+  lcd.setCursor(5,0); lcd.write(byte(0)); // Frame 3...
+  lcd.setCursor(6,0); lcd.write(byte(1));
+  lcd.setCursor(7,0); lcd.write(byte(2));
+  lcd.setCursor(8,0); lcd.write(byte(4));
+  lcd.setCursor(8,1); lcd.write(byte(7)); // Taça cheia
+  delay(500);                        // Pausa 500 ms
+
+  lcd.clear();                       // Limpa para frame final
+  lcd.setCursor(5,0); lcd.write(byte(0));
+  lcd.setCursor(6,0); lcd.write(byte(1));
+  lcd.setCursor(7,0); lcd.write(byte(2));
+  lcd.setCursor(8,0); lcd.write(byte(3));
+  lcd.setCursor(8,1); lcd.write(byte(7));
+  delay(500);                        // Pausa 500 ms
+
+  // boas-vindas
+  lcd.clear();                       // Limpa display
+  lcd.setCursor(0,0); lcd.print(" BEM-VINDO(a)!  "); // Mostra mensagem de boas-vindas (linha 0)
+  lcd.setCursor(0,1); lcd.print("Vinheria Agnello"); // Mostra nome (linha 1)
+  delay(2000);                       // Exibe por 2 segundos
+
+  // RTC
+  if (!rtc.begin()) {                // Tenta iniciar o RTC; se falhar, trava e avisa
+    lcd.clear();                     // Limpa display
+    lcd.setCursor(0,0); lcd.print("RTC nao detectado"); // Mensagem de erro
+    lcd.setCursor(0,1); lcd.print("Verifique cabos");   // Dica para verificar conexões
+    while (1) delay(1000);           // Loop infinito pausando (impede seguir sem RTC)
+  }
+
+  // DHT
+  dht.begin();                       // Inicializa o sensor DHT
+
+  // I/O
+  pinMode(ledGreen, OUTPUT);  digitalWrite(ledGreen, LOW);   // Configura LED verde como saída e apaga
+  pinMode(ledYellow, OUTPUT); digitalWrite(ledYellow, LOW);  // Configura LED amarelo como saída e apaga
+  pinMode(ledRed, OUTPUT);    digitalWrite(ledRed, LOW);     // Configura LED vermelho como saída e apaga
+  pinMode(buzzer, OUTPUT);    noTone(buzzer);                // Configura buzzer como saída e garante sem som
+  pinMode(joySW, INPUT_PULLUP);                                 // Botão do joystick com pull-up interno
+
+  lcd.clear();                       // Limpa display
+  lcd.setCursor(0,0); lcd.print("Sistema pronto..."); // Indica que o sistema está pronto
+  delay(500);                        // Pequena pausa antes de limpar
+  lcd.clear();                       // Limpa display para operar
+
+  lastDHTreadMillis = millis() - DHT_INTERVAL; // Força primeira leitura do DHT imediata no loop
+  Serial.println("Setup concluido"); // Mensagem na serial indicando fim do setup
+}
+
+// -------- loop --------
+void loop() {
+  // LDR -> 0..100%
+  int rawLDR = analogRead(ldrPin);   // Lê valor bruto do LDR (0..1023)
+  lum = map(rawLDR, 0, 1023, 0, 100); // Mapeia para 0..100%
+  if (lum < 0) lum = 0; if (lum > 100) lum = 100; // Garante limites 0..100
+
+  // DHT a cada 2s
+  if (millis() - lastDHTreadMillis >= DHT_INTERVAL) { // Checa intervalo para ler DHT
+    lastDHTreadMillis = millis();    // Atualiza timestamp da última leitura
+    float ttemp = dht.readTemperature(); // Lê temperatura bruta do DHT
+    float thum  = dht.readHumidity();    // Lê umidade bruta do DHT
+
+    if (isnan(ttemp)) { delay(150); ttemp = dht.readTemperature(); } // Re-tenta se NaN
+    if (isnan(ttemp))  tempC = -999.0; else               tempC = (ttemp > 60.0) ? ((ttemp - 32.0) * 5.0 / 9.0) : ttemp;
+                                       // Se leitura inválida marca -999; se >60 assume Fahrenheit e converte
+
+    if (isnan(thum)) { delay(150); thum = dht.readHumidity(); } // Re-tenta leitura de umidade se NaN
+    hum = isnan(thum) ? -1.0 : thum;     // Se inválida marca -1, caso contrário armazena valor
+
+    Serial.print("Temp(C): ");           // Debug na serial: imprime temperatura
+    if (tempC == -999.0) Serial.print("NaN"); else Serial.print(tempC);
+    Serial.print("  Hum(%): "); Serial.print(hum);
+    Serial.print("  Lum(%): "); Serial.println(lum); // Imprime umidade e luminosidade e pula linha
+  }
+
+  // avaliação
+  tudoOk = true;                       // Assume que está tudo OK até provas contrárias
+  if (tempC == -999.0 || tempC < tempMin || tempC > tempMax) tudoOk = false; // Verifica temperatura
+  if (hum   < 0.0     || hum   < umidMin || hum   > umidMax) tudoOk = false; // Verifica umidade
+  if (lum   < lumMin  || lum   > lumMax)  tudoOk = false;                     // Verifica luminosidade
+
+  // ---------- ERRO: mostra só o que tá fora ----------
+  if (!tudoOk) {                       // Se algum parâmetro está fora das faixas
+    menuIntroShown = false; // reseta scroll para próxima normalização
+    lcd.clear();                     // Limpa display para mostrar erros
+
+    bool alerta = false, critico = false; // Flags para classificação do problema
+
+    // TEMPERATURA (slot 0)
+    if (tempC == -999.0 || tempC < tempMin || tempC > tempMax) { // Se temperatura inválida ou fora faixa
+      if (tempC == -999.0 || tempC < tempMin) lcd.createChar(0, termVazia_b);
+      else                                     lcd.createChar(0, termCheia_b);
+      lcd.setCursor(0,0); lcd.write(byte(0)); lcd.print(" "); // Desenha ícone e espaçamento
+      if (tempC == -999.0) { lcd.print("--.-"); }            // Se inválida mostra "--.-"
+      else { lcd.print(tempC,1); }                            // Senão imprime temperatura com 1 casa
+      lcd.print((char)223); lcd.print("C");                   // Imprime símbolo de grau e 'C'
+      if (tempC == -999.0 || tempC < tempMin) alerta = true; else critico = true; // Classifica alerta/critico
+    }
+
+    // UMIDADE (slot 1)
+    if (hum < 0.0 || hum < umidMin || hum > umidMax) { // Se umidade inválida ou fora faixa
+      if (hum < 0.0 || hum < umidMin) lcd.createChar(1, gotaVazia_b);
+      else                            lcd.createChar(1, gotaCheia_b);
+      lcd.setCursor(0,1); lcd.write(byte(1)); lcd.print(" "); // Desenha ícone e espaço
+      if (hum < 0.0) lcd.print("--%"); else { lcd.print((int)hum); lcd.print("%"); } // Mostra valor ou "--%"
+      if (hum < 0.0 || hum < umidMin) alerta = true; else critico = true; // Define nível
+    }
+
+    // LUMINOSIDADE (slot 2)
+    if (lum < lumMin || lum > lumMax) { // Se luminosidade fora da faixa
+      if (lum < lumMin) lcd.createChar(2, lampVazia_b);
+      else              lcd.createChar(2, lampCheia_b);
+      lcd.setCursor(8,1); lcd.write(byte(2)); lcd.print(" "); // Mostra ícone na segunda linha, coluna 8
+      lcd.print(lum); lcd.print("%");                         // Imprime porcentagem de luminosidade
+      if (lum < lumMin) alerta = true; else critico = true;  // Define alerta/critico conforme direção do erro
+    }
+
+    // Sinalização
+    if (critico) {                     // Se critico, LED vermelho e um toque longo
+      digitalWrite(ledRed, HIGH);      // Liga LED vermelho
+      digitalWrite(ledYellow, LOW);    // Apaga amarelo
+      digitalWrite(ledGreen, LOW);     // Apaga verde
+      tone(buzzer, 1000); delay(600); noTone(buzzer); // Toca buzzer em 1kHz por 600ms
+    } else if (alerta) {               // Se apenas alerta, pisca amarelo e toca som curto
+      for (int i=0;i<3;i++){
+        digitalWrite(ledYellow, HIGH); tone(buzzer,1500); delay(150); // Pisca e toca
+        noTone(buzzer); digitalWrite(ledYellow, LOW); delay(150);     // Apaga e pausa
+      }
+      digitalWrite(ledYellow, HIGH);    // Mantém amarelo ligado no final
+      digitalWrite(ledGreen, LOW);      // Verde apagado
+      digitalWrite(ledRed, LOW);        // Vermelho apagado
+    }
+
+    delay(600);                        // Pausa para dar tempo de visualização
+    return; // permanece no modo ERRO; não entra no menu (sai do loop atual)
+  }
+
+  // ---------- TUDO OK: MENU ----------
+  digitalWrite(ledGreen, HIGH);       // Liga LED verde
+  digitalWrite(ledYellow, LOW);       // Apaga amarelo
+  digitalWrite(ledRed, LOW);          // Apaga vermelho
+  noTone(buzzer);                      // Garante buzzer desligado
+
+  // Scroll 1x por sessão
+  if (!menuIntroShown) {               // Se a introdução do menu não foi mostrada ainda
+    lcd.clear();                       // Limpa display
+    lcd.setCursor(0,0); lcd.print("1:Mudar horario 2:Ver "); // Escreve linha superior do texto rolante
+    lcd.setCursor(0,1); lcd.print("3:Ver status ideal   "); // Escreve linha inferior do texto rolante
+    for (int s=0; s<20; s++) { delay(120); lcd.scrollDisplayLeft(); } // Rola o texto 20 vezes
+    menuIntroShown = true;            // Marca que já rolou para essa sessão
+  }
+
+  // Desenha o menu e navegação
+  lcd.clear();                         // Limpa display antes de desenhar menu
+  lcd.setCursor(0,0);
+  if (menuIndex == 0) lcd.print("> Mudar horario"); // Opção 0 selecionada (com '>')
+  else                lcd.print("  Mudar horario"); // Opção 0 não selecionada
+
+  lcd.setCursor(0,1);
+  if      (menuIndex == 1) lcd.print("> Ver status atual"); // Opção 1 selecionada
+  else if (menuIndex == 2) lcd.print("> Ver status ideal"); // Opção 2 selecionada
+  else                     lcd.print("  Ver status atual"); // Nenhuma selecionada -> mostra padrão
+
+  int valY = analogRead(joyVert);      // Lê posição vertical do joystick
+  if (valY < 400) { menuIndex--; if (menuIndex < 0) menuIndex = 2; delay(160); } // Move para cima no menu
+  else if (valY > 600) { menuIndex++; if (menuIndex > 2) menuIndex = 0; delay(160); } // Move para baixo
+
+  if (digitalRead(joySW) == LOW) {     // Se botão do joystick pressionado (ativo LOW)
+    if (millis() - lastDebounce > debounceDelay) { // Debounce simples
+      lastDebounce = millis();         // Atualiza tempo do debounce
+
+      // ================= OPÇÃO 0: EDITOR GIRATÓRIO DE DATA/HORA =================
+      if (menuIndex == 0) {
+        DateTime now = rtc.now();      // Lê data/hora atual do RTC
+        int eHour  = now.hour();       // Hora para edição
+        int eMin   = now.minute();     // Minuto para edição
+        int eDay   = now.day();        // Dia para edição
+        int eMonth = now.month();      // Mês para edição
+        int eYear  = now.year();       // Ano para edição (faixa 2020..2099 sugerida)
+
+        int field = 0; // 0=Hora,1=Min,2=Dia,3=Mês,4=Ano  // Campo atualmente editado
+        bool editing = true;           // Flag do loop de edição
+
+        unsigned long lastMove = 0;    // Tempo da última mudança para controlar repetição
+        const unsigned long moveDelay = 160UL; // Delay entre mudanças ao manter joystick
+
+        while (editing) {              // Loop de edição (bloqueante até salvar)
+          // dias do mês (com bissexto)
+          int dim;
+          {
+            bool leap = ((eYear % 4 == 0) && (eYear % 100 != 0)) || (eYear % 400 == 0); // Checa bissexto
+            if      (eMonth == 1 || eMonth == 3 || eMonth == 5 || eMonth == 7 || eMonth == 8 || eMonth == 10 || eMonth == 12) dim = 31;
+            else if (eMonth == 4 || eMonth == 6 || eMonth == 9 || eMonth == 11) dim = 30;
+            else dim = leap ? 29 : 28;  // Fevereiro depende de bissexto
+          }
+          if (eDay > dim) eDay = dim;  // Garante dia válido caso mês/ano mudem
+
+          // UI
+          lcd.clear();                 // Limpa display do editor
+          lcd.setCursor(0,0); 
+          lcd.print("Editar horario"); // Título do editor
+          lcd.setCursor(0,1);
+          if (field == 0) { // Hora
+            lcd.print("> Hora  ");     // Indica campo Hora selecionado
+            if (eHour < 10) lcd.print("0"); lcd.print(eHour); // Formata com zero à esquerda
+            lcd.print(":");
+            if (eMin < 10) lcd.print("0"); lcd.print(eMin);
+          } else if (field == 1) { // Min
+            lcd.print("> Min   ");    // Indica campo Min selecionado
+            if (eHour < 10) lcd.print("0"); lcd.print(eHour);
+            lcd.print(":");
+            if (eMin < 10) lcd.print("0"); lcd.print(eMin);
+          } else if (field == 2) { // Dia
+            lcd.print("> Dia   ");    // Indica campo Dia selecionado
+            if (eDay < 10) lcd.print("0"); lcd.print(eDay);
+            lcd.print("/");
+            if (eMonth < 10) lcd.print("0"); lcd.print(eMonth);
+          } else if (field == 3) { // Mês
+            lcd.print("> Mes   ");    // Indica campo Mês selecionado
+            if (eDay < 10) lcd.print("0"); lcd.print(eDay);
+            lcd.print("/");
+            if (eMonth < 10) lcd.print("0"); lcd.print(eMonth);
+          } else { // Ano
+            lcd.print("> Ano   ");    // Indica campo Ano selecionado
+            lcd.print(eYear);
+          }
+
+          int y = analogRead(joyVert); // Lê joystick vertical
+          int x = analogRead(joyHorz); // Lê joystick horizontal
+          bool swPressed = (digitalRead(joySW) == LOW); // Lê botão do joystick
+
+          if (millis() - lastMove > moveDelay) { // Controla velocidade de mudança ao segurar
+            if (y < 400) { // cima -> campo anterior
+              field--; if (field < 0) field = 4; lastMove = millis(); // Cicla para cima
+            } else if (y > 600) { // baixo -> próximo campo
+              field++; if (field > 4) field = 0; lastMove = millis(); // Cicla para baixo
+            } else if (x < 400) { // esquerda -> decrementa valor do campo
+              if (field == 0) { eHour--;  if (eHour  < 0)  eHour  = 23; }
+              else if (field == 1) { eMin--;   if (eMin   < 0)  eMin   = 59; }
+              else if (field == 2) { eDay--;   if (eDay   < 1)  eDay   = dim; }
+              else if (field == 3) { eMonth--; if (eMonth < 1)  eMonth = 12; }
+              else { eYear--; if (eYear < 2020) eYear = 2099; } // Cicla ano no intervalo definido
+              lastMove = millis();
+            } else if (x > 600) { // direita -> incrementa valor do campo
+              if (field == 0) { eHour++;  if (eHour  > 23) eHour  = 0; }
+              else if (field == 1) { eMin++;   if (eMin   > 59) eMin   = 0; }
+              else if (field == 2) { eDay++;   if (eDay   > dim) eDay   = 1; }
+              else if (field == 3) { eMonth++; if (eMonth > 12) eMonth = 1; }
+              else { eYear++; if (eYear > 2099) eYear = 2020; } // Cicla ano
+              lastMove = millis();
+            }
+          }
+
+          if (swPressed) {              // Se pressionou salvar/entrar
+            if (millis() - lastDebounce > debounceDelay) { // Debounce antes de confirmar
+              lastDebounce = millis();
+              rtc.adjust(DateTime(eYear, eMonth, eDay, eHour, eMin, 0)); // Ajusta RTC com novos valores
+              lcd.clear();
+              lcd.setCursor(0,0); lcd.print("Hora atualizada!"); // Mensagem de confirmação
+              lcd.setCursor(0,1);
+              if (eDay < 10) lcd.print("0"); lcd.print(eDay); lcd.print("/");
+              if (eMonth < 10) lcd.print("0"); lcd.print(eMonth); lcd.print("/");
+              lcd.print(eYear); lcd.print(" ");
+              if (eHour < 10) lcd.print("0"); lcd.print(eHour); lcd.print(":");
+              if (eMin  < 10) lcd.print("0"); lcd.print(eMin);
+              delay(900);             // Mostra confirmação por 900 ms
+              editing = false;        // Sai do editor
+            }
+          }
+
+          delay(40); // suaviza leitura sem travar (pequeno atraso)
+        } // while(editing)
+      }
+      // ================= FIM OPÇÃO 0 =================
+
+      // OPÇÃO 1: status atual
+      else if (menuIndex == 1) {
+        lcd.clear();
+        if      (tempC < tempMin) lcd.createChar(0, termVazia_b);
+        else if (tempC > tempMax) lcd.createChar(0, termCheia_b);
+        else                      lcd.createChar(0, termMeio_b);
+        lcd.setCursor(0,0); lcd.write(byte(0)); lcd.print(" "); // Desenha ícone de temperatura
+        lcd.print(tempC,1); lcd.print((char)223); lcd.print("C"); // Exibe temperatura atual
+        delay(1100);               // Pausa para leitura
+
+        lcd.clear();
+        if      (hum < 0.0 || hum < umidMin) lcd.createChar(1, gotaVazia_b);
+        else if (hum > umidMax)              lcd.createChar(1, gotaCheia_b);
+        else                                 lcd.createChar(1, gotaMeio_b);
+        lcd.setCursor(0,0); lcd.write(byte(1)); lcd.print(" "); // Desenha ícone de umidade
+        if (hum < 0.0) lcd.print("--%"); else { lcd.print((int)hum); lcd.print("%"); } // Exibe umidade
+        delay(1100);               // Pausa para leitura
+
+        lcd.clear();
+        if      (lum < lumMin) lcd.createChar(2, lampVazia_b);
+        else if (lum > lumMax) lcd.createChar(2, lampCheia_b);
+        else                   lcd.createChar(2, lampMeio_b);
+        lcd.setCursor(0,0); lcd.write(byte(2)); lcd.print(" "); // Desenha ícone de luminosidade
+        lcd.print(lum); lcd.print("%"); // Exibe luminosidade atual
+        delay(1300);               // Pausa para leitura
+      }
+
+      // OPÇÃO 2: status ideal
+      else if (menuIndex == 2) {
+        lcd.clear();
+        lcd.setCursor(0,0);
+        lcd.print("T:"); lcd.print(tempMin); lcd.print("-"); lcd.print(tempMax); lcd.print((char)223); lcd.print("C"); // Mostra faixa ideal temperatura
+        lcd.setCursor(0,1);
+        lcd.print("U:"); lcd.print(umidMin); lcd.print("-"); lcd.print(umidMax); lcd.print("%"); // Mostra faixa ideal umidade
+        delay(1500);               // Pausa para leitura
+        lcd.clear();
+        lcd.setCursor(0,0);
+        lcd.print("L:"); lcd.print(lumMin); lcd.print("-"); lcd.print(lumMax); lcd.print("%"); // Mostra faixa ideal luminosidade
+        delay(1500);               // Pausa para leitura
+      }
+    }
+  }
+
+  delay(100); // Pequeno atraso no final do loop principal para suavizar processamento
+}
