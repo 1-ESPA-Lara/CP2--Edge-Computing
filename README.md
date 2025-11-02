@@ -65,16 +65,6 @@ Se qualquer parâmetro estiver fora do ideal, o menu é desativado e o sistema e
   - EEPROM.h - biblioteca padrão Arduino
 - Código disponível para uso educacional e demonstrações acadêmicas, mediante citação da fonte e da instituição.
 
-## Estrutura do repositório
-```bash
-├── README.md
-├── simulador/
-│   └── vinheria_simulador.ino
-├── hands-on/
-│   └── vinheria_hands_on.ino
-└── docs/
-    └── esquema_conexao.jpg
-```
 ## Equipe de Desenvolvimento
 - Lara Mofid Essa Alssabak — RM567947
 - Maria Luisa Boucinhos Franco — RM567355
