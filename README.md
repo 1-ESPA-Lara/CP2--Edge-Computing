@@ -3,7 +3,7 @@
 ## Discrição do projeto
 Projeto acadêmico desenvolvido na FIAP com foco em monitoramento ambiental aplicado ao armazenamento de vinhos. O sistema realiza leitura contínua de temperatura, umidade e luminosidade, garantindo que as variáveis permaneçam dentro das faixas ideais de conservação. Conta com interface interativa via display (LCD ou gráfico 128x64), menus configuráveis e persistência de dados na EEPROM.
 
-## Visão gearl do projeto 
+## Visão geral do projeto 
 Simulação disponivel o Wokwi: https://wokwi.com/projects/445364386655015937
 <img width="800" height="500" alt="image" src="https://github.com/user-attachments/assets/046abb29-3b29-4406-9723-3bb7d9dd71a2" />
 
